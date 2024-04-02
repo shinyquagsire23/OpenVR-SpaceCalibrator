@@ -121,7 +121,7 @@ void CalibrationCalc::Clear() {
 	m_relativePosCalibrated = false;
 }
 
-Eigen::Vector3d CalibrationCalc::CalibrateRotation() const {
+std::pair<Eigen::Vector3d, double> CalibrationCalc::CalibrateRotation() const {
 	std::vector<DSample> deltas;
 
 	for (size_t i = 0; i < m_samples.size(); i++)
@@ -142,6 +142,7 @@ Eigen::Vector3d CalibrationCalc::CalibrateRotation() const {
     // Initialize 2D points and centroids
     Eigen::MatrixXd refPoints(deltas.size(), 2), targetPoints(deltas.size(), 2);
     Eigen::Vector2d refCentroid(0, 0), targetCentroid(0, 0);
+	double f_sd2 = 0.0, f_sd2_tar = 0.0;
 
     // Fill matrices and calculate centroids
     for (size_t i = 0; i < deltas.size(); i++) {
@@ -150,6 +151,9 @@ Eigen::Vector3d CalibrationCalc::CalibrateRotation() const {
 
         targetPoints.row(i) << deltas[i].target[0], deltas[i].target[2];  // Take only the x and z components
         targetCentroid += targetPoints.row(i);
+
+		f_sd2 += refPoints.row(i).squaredNorm();
+		f_sd2_tar += targetPoints.row(i).squaredNorm();
     }
 
     refCentroid /= (double)deltas.size();
@@ -171,6 +175,11 @@ Eigen::Vector3d CalibrationCalc::CalibrateRotation() const {
     Eigen::Matrix2d i = Eigen::Matrix2d::Identity();
     Eigen::Matrix2d rot = svd.matrixV() * i * svd.matrixU().transpose();
 
+	double f_det = rot.determinant();
+	Eigen::Vector3d e(1, 1, (f_det < 0) ? -1 : 1);
+	double f_scale = svd.singularValues().dot(e) / f_sd2_tar;
+	double f_inv_scale = svd.singularValues().dot(e) / f_sd2;
+
     // Calculate yaw angle in radians
     double yaw = std::atan2(rot(1, 0), rot(0, 0));
 
@@ -179,10 +188,10 @@ Eigen::Vector3d CalibrationCalc::CalibrateRotation() const {
 
 	//snprintf(buf, sizeof buf, "Calibrated rotation: yaw=%.2f pitch=%.2f roll=%.2f\n", euler[1], euler[2], euler[0]);
 	//CalCtx.Log(buf);
-	return euler;
+	return std::make_pair(euler, 1.0/f_inv_scale);
 }
 
-Eigen::Vector3d CalibrationCalc::CalibrateTranslation(const Eigen::Matrix3d &rotation) const
+Eigen::Vector3d CalibrationCalc::CalibrateTranslation(const Eigen::Matrix3d &rotation, double scale) const
 {
 	std::vector<std::pair<Eigen::Vector3d, Eigen::Matrix3d>> deltas;
 
@@ -190,13 +199,13 @@ Eigen::Vector3d CalibrationCalc::CalibrateTranslation(const Eigen::Matrix3d &rot
 	{
 		Sample s_i = m_samples[i];
 		s_i.target.rot = rotation * s_i.target.rot;
-		s_i.target.trans = rotation * s_i.target.trans;
+		s_i.target.trans = (rotation * s_i.target.trans)* scale;
 
 		for (size_t j = 0; j < i; j++)
 		{
 			Sample s_j = m_samples[j];
 			s_j.target.rot = rotation * s_j.target.rot;
-			s_j.target.trans = rotation * s_j.target.trans;
+			s_j.target.trans = (rotation * s_j.target.trans) * scale;
 			
 			auto QAi = s_i.ref.rot.transpose();
 			auto QAj = s_j.ref.rot.transpose();
@@ -235,10 +244,10 @@ Eigen::Vector3d CalibrationCalc::CalibrateTranslation(const Eigen::Matrix3d &rot
 
 
 namespace {
-	Pose ApplyTransform(const Pose& originalPose, const Eigen::AffineCompact3d& transform) {
+	Pose ApplyTransform(const Pose& originalPose, const Eigen::AffineCompact3d& transform, double scale) {
 		Pose pose(originalPose);
 		pose.rot = transform.rotation() * pose.rot;
-		pose.trans = transform * pose.trans;
+		pose.trans = (transform * pose.trans) * scale;
 		return pose;
 	}
 
@@ -250,22 +259,25 @@ namespace {
 	}
 }
 
-Eigen::AffineCompact3d CalibrationCalc::ComputeCalibration() const {
-	Eigen::Vector3d rotation = CalibrateRotation();
+std::pair<Eigen::AffineCompact3d, double> CalibrationCalc::ComputeCalibration() const {
+	std::pair<Eigen::Vector3d, double> rotationAndScale = CalibrateRotation();
+	Eigen::Vector3d rotation = rotationAndScale.first;
+	double scale = rotationAndScale.second;
 	Eigen::Matrix3d rotationMat = quaternionRotateMatrix(VRRotationQuat(rotation));
-	Eigen::Vector3d translation = CalibrateTranslation(rotationMat);
+	Eigen::Vector3d translation = CalibrateTranslation(rotationMat, scale);
 	
 	Eigen::AffineCompact3d rot(rotationMat);
 	Eigen::Translation3d trans(translation);
 
-	return trans * rot;
+	return std::make_pair(trans * rot, scale);
 }
 
 
 
 double CalibrationCalc::RetargetingErrorRMS(
 	const Eigen::Vector3d& hmdToTargetPos,
-	const Eigen::AffineCompact3d& calibration
+	const Eigen::AffineCompact3d& calibration,
+	double scale
 ) const {
 	double errorAccum = 0;
 	int sampleCount = 0;
@@ -274,7 +286,7 @@ double CalibrationCalc::RetargetingErrorRMS(
 		if (!sample.valid) continue;
 
 		// Apply transformation
-		const auto updatedPose = ApplyTransform(sample.target, calibration);
+		const auto updatedPose = ApplyTransform(sample.target, calibration, scale);
 
 		const Eigen::Vector3d hmdPoseSpace = sample.ref.rot * hmdToTargetPos + sample.ref.trans;
 
@@ -287,7 +299,7 @@ double CalibrationCalc::RetargetingErrorRMS(
 	return sqrt(errorAccum / sampleCount);
 }
 
-Eigen::Vector3d CalibrationCalc::ComputeRefToTargetOffset(const Eigen::AffineCompact3d& calibration) const {
+Eigen::Vector3d CalibrationCalc::ComputeRefToTargetOffset(const Eigen::AffineCompact3d& calibration, double scale) const {
 	Eigen::Vector3d accum = Eigen::Vector3d::Zero();
 	int sampleCount = 0;
 
@@ -295,7 +307,7 @@ Eigen::Vector3d CalibrationCalc::ComputeRefToTargetOffset(const Eigen::AffineCom
 		if (!sample.valid) continue;
 
 		// Apply transformation
-		const auto updatedPose = ApplyTransform(sample.target, calibration);
+		const auto updatedPose = ApplyTransform(sample.target, calibration, scale);
 
 		// Now move the transform from world to HMD space
 		const auto hmdOriginPos = updatedPose.trans - sample.ref.trans;
@@ -359,10 +371,10 @@ Eigen::Vector4d CalibrationCalc::ComputeAxisVariance(
 	return solver.eigenvalues();
 }
 
-bool CalibrationCalc::ValidateCalibration(const Eigen::AffineCompact3d &calibration, double *error, Eigen::Vector3d *posOffsetV) {
+bool CalibrationCalc::ValidateCalibration(const Eigen::AffineCompact3d &calibration, double scale, double *error, Eigen::Vector3d *posOffsetV) {
 	bool ok = true;
 
-	const auto posOffset = ComputeRefToTargetOffset(calibration);
+	const auto posOffset = ComputeRefToTargetOffset(calibration, scale);
 
 	if (posOffsetV) *posOffsetV = posOffset;
 
@@ -370,7 +382,7 @@ bool CalibrationCalc::ValidateCalibration(const Eigen::AffineCompact3d &calibrat
 	//snprintf(buf, sizeof buf, "HMD to target offset: (%.2f, %.2f, %.2f)\n", posOffset(0), posOffset(1), posOffset(2));
 	//CalCtx.Log(buf);
 
-	double rmsError = RetargetingErrorRMS(posOffset, calibration);
+	double rmsError = RetargetingErrorRMS(posOffset, calibration, scale);
 	//snprintf(buf, sizeof buf, "Position error (RMS): %.3f\n", rmsError);
 	//CalCtx.Log(buf);
 	if (rmsError > 0.1) ok = false;
@@ -491,12 +503,15 @@ bool CalibrationCalc::CalibrateByRelPose(Eigen::AffineCompact3d &out) const {
 
 
 bool CalibrationCalc::ComputeOneshot() {
-	auto calibration = ComputeCalibration();
+	auto calibrationPair = ComputeCalibration();
+	auto calibration = calibrationPair.first;
+	double scale = calibrationPair.second;
 
-	bool valid = ValidateCalibration(calibration);
+	bool valid = ValidateCalibration(calibration, scale);
 
 	if (valid) {
 		m_estimatedTransformation = calibration;
+		m_estimatedScale = scale;
 		m_isValid = true;
 		return true;
 	}
@@ -510,7 +525,7 @@ void CalibrationCalc::ComputeInstantOffset() {
 	const auto &latestSample = m_samples.back();
 
 	// Apply transformation
-	const auto updatedPose = ApplyTransform(latestSample.target, m_estimatedTransformation);
+	const auto updatedPose = ApplyTransform(latestSample.target, m_estimatedTransformation, m_estimatedScale);
 
 	// Now move the transform from world to HMD space
 	const auto hmdOriginPos = updatedPose.trans - latestSample.ref.trans;
@@ -527,7 +542,7 @@ bool CalibrationCalc::ComputeIncremental(bool &lerp, double threshold) {
 	double priorCalibrationError = INFINITY;
 	Eigen::Vector3d priorPosOffset;
     if (m_isValid) {
-        ValidateCalibration(m_estimatedTransformation, &priorCalibrationError, &priorPosOffset);
+        ValidateCalibration(m_estimatedTransformation, m_estimatedScale, &priorCalibrationError, &priorPosOffset);
 		
         Metrics::posOffset_currentCal.Push(priorPosOffset * 1000);
         Metrics::error_currentCal.Push(priorCalibrationError * 1000);
@@ -544,7 +559,7 @@ bool CalibrationCalc::ComputeIncremental(bool &lerp, double threshold) {
 
     if (enableStaticRecalibration && CalibrateByRelPose(byRelPose)) {
 		Eigen::Vector3d relPosOffset;
-		ValidateCalibration(byRelPose, &relPoseError, &relPosOffset);
+		ValidateCalibration(byRelPose, 1.0, &relPoseError, &relPosOffset);
         Metrics::posOffset_byRelPose.Push(relPosOffset * 1000);
         Metrics::error_byRelPose.Push(relPoseError * 1000);
 		
@@ -561,7 +576,8 @@ bool CalibrationCalc::ComputeIncremental(bool &lerp, double threshold) {
 
 	double newVariance = 0;
     if (!newCalibrationValid) {
-        calibration = ComputeCalibration();
+		auto checkPair = ComputeCalibration();
+		calibration = checkPair.first;
 
         newVariance = ComputeAxisVariance(calibration)(1);
 		Metrics::axisIndependence.Push(newVariance);
@@ -569,7 +585,7 @@ bool CalibrationCalc::ComputeIncremental(bool &lerp, double threshold) {
         if (newVariance < AxisVarianceThreshold && newVariance < m_axisVariance) {
             newCalibrationValid = false;
         } else {
-            newCalibrationValid = ValidateCalibration(calibration, &newError, &m_posOffset);
+            newCalibrationValid = ValidateCalibration(calibration, checkPair.second, &newError, &m_posOffset);
             Metrics::posOffset_rawComputed.Push(m_posOffset * 1000);
         }
 
@@ -599,7 +615,7 @@ bool CalibrationCalc::ComputeIncremental(bool &lerp, double threshold) {
 	// Now, can we use the relative pose to perform a rapid correction?
     if (!newCalibrationValid) {
 		
-        double existingPoseErrorUsingRelPosition = RetargetingErrorRMS(m_refToTargetPose.translation(), m_estimatedTransformation);
+        double existingPoseErrorUsingRelPosition = RetargetingErrorRMS(m_refToTargetPose.translation(), m_estimatedTransformation, m_estimatedScale);
         Metrics::error_currentCalRelPose.Push(existingPoseErrorUsingRelPosition * 1000);
 		if (relPoseError * threshold < existingPoseErrorUsingRelPosition || newCalibrationValid && relPoseError < newError) {
 		newCalibrationValid = true;

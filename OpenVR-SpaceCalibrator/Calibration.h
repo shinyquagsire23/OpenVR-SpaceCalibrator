@@ -6,6 +6,7 @@
 #include <openvr.h>
 #include <vector>
 #include <deque>
+#include <map>
 
 #include "../Protocol.h"
 
@@ -28,16 +29,17 @@ struct StandbyDevice {
 struct CalibrationContext
 {
 	CalibrationState state = CalibrationState::None;
-	int32_t referenceID = -1, targetID = -1;
+	int32_t referenceID = -1, calibratingTargetID = -1;
 
 	StandbyDevice targetStandby, referenceStandby;
 
-	Eigen::Vector3d calibratedRotation;
-	Eigen::Vector3d calibratedTranslation;
-	double calibratedScale;
+	std::map<std::string, Eigen::Vector3d> calibratedRotations;
+	std::map<std::string, Eigen::Vector3d> calibratedTranslations;
+	std::map<std::string, double> calibratedScales;
+	std::map<uint32_t, std::string> targetTrackingSystemFromID;
 
 	std::string referenceTrackingSystem;
-	std::string targetTrackingSystem;
+	std::string calibratingTargetTrackingSystem;
 
 	bool enabled = false;
 	bool validProfile = false;
@@ -65,7 +67,6 @@ struct CalibrationContext
 	vr::DriverPose_t devicePoses[vr::k_unMaxTrackedDeviceCount];
 
 	CalibrationContext() {
-		calibratedScale = 1.0;
 		memset(devicePoses, 0, sizeof(devicePoses));
 		ResetConfig();
 	}
@@ -108,15 +109,35 @@ struct CalibrationContext
 		chaperone.playSpaceSize = vr::HmdVector2_t();
 		chaperone.valid = false;
 
-		calibratedRotation = Eigen::Vector3d();
-		calibratedTranslation = Eigen::Vector3d();
-		calibratedScale = 1.0;
+		calibratedRotations.clear();
+		calibratedTranslations.clear();
+		calibratedScales.clear();
+		targetTrackingSystemFromID.clear();
 		referenceTrackingSystem = "";
-		targetTrackingSystem = "";
+		calibratingTargetTrackingSystem = "";
 		enabled = false;
 		validProfile = false;
 		refToTargetPose = Eigen::AffineCompact3d::Identity();
 		relativePosCalibrated = true;
+	}
+
+	void ResetCalibrationForSystem(std::string systemName)
+	{
+		if (!TrackingSystemHasCalibration(systemName)) {
+			return;
+		}
+		calibratedRotations.erase(systemName);
+		calibratedTranslations.erase(systemName);
+		calibratedScales.erase(systemName);
+	}
+
+	bool TrackingSystemHasCalibration(std::string systemName)
+	{
+		return calibratedRotations.find(systemName) != calibratedRotations.end();
+	}
+
+	bool TrackingIDHasAssociatedSystem(uint32_t id) {
+		return targetTrackingSystemFromID.find(id) != targetTrackingSystemFromID.end();
 	}
 
 	size_t SampleCount()
@@ -177,8 +198,8 @@ struct CalibrationContext
 	}
 
 	bool TargetPoseIsValid() const {
-		return targetID >= 0 && targetID <= vr::k_unMaxTrackedDeviceCount
-			&& devicePoses[targetID].poseIsValid;
+		return calibratingTargetID >= 0 && calibratingTargetID <= vr::k_unMaxTrackedDeviceCount
+			&& devicePoses[calibratingTargetID].poseIsValid;
 	}
 
 	bool ReferencePoseIsValid() const {

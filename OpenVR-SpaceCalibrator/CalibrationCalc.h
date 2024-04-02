@@ -110,6 +110,7 @@ public:
 	Eigen::Vector3d m_posOffset;
 	double m_axisVariance = 0.0;
 	long m_calcCycle;
+	double m_estimatedScale = 1.0;
 
 private:
 	bool m_isValid;
@@ -124,17 +125,17 @@ private:
 
 	std::deque<Sample> m_samples;
 
-	Eigen::Vector3d CalibrateRotation() const;
-	Eigen::Vector3d CalibrateTranslation(const Eigen::Matrix3d &rotation) const;
+	std::pair<Eigen::Vector3d, double> CalibrateRotation() const;
+	Eigen::Vector3d CalibrateTranslation(const Eigen::Matrix3d &rotation, double scale) const;
 
-	Eigen::AffineCompact3d ComputeCalibration() const;
+	std::pair<Eigen::AffineCompact3d, double> ComputeCalibration() const;
 
-	double RetargetingErrorRMS(const Eigen::Vector3d& hmdToTargetPos, const Eigen::AffineCompact3d& calibration) const;
-	Eigen::Vector3d ComputeRefToTargetOffset(const Eigen::AffineCompact3d& calibration) const;
+	double RetargetingErrorRMS(const Eigen::Vector3d& hmdToTargetPos, const Eigen::AffineCompact3d& calibration, double scale) const;
+	Eigen::Vector3d ComputeRefToTargetOffset(const Eigen::AffineCompact3d& calibration, double scale) const;
 
 	Eigen::Vector4d ComputeAxisVariance(const Eigen::AffineCompact3d& calibration) const;
 
-	bool ValidateCalibration(const Eigen::AffineCompact3d& calibration, double *errorOut = nullptr, Eigen::Vector3d* posOffsetV = nullptr);
+	bool ValidateCalibration(const Eigen::AffineCompact3d& calibration, double scale, double *errorOut = nullptr, Eigen::Vector3d* posOffsetV = nullptr);
 	void ComputeInstantOffset();
 
 	Eigen::AffineCompact3d EstimateRefToTargetPose(const Eigen::AffineCompact3d& calibration) const;

@@ -103,24 +103,38 @@ static void ParseProfile(CalibrationContext &ctx, std::istream &stream)
 
 	LoadAlignmentParams(ctx, obj["alignment_params"]);
 	ctx.referenceTrackingSystem = obj["reference_tracking_system"].get<std::string>();
-	ctx.targetTrackingSystem = obj["target_tracking_system"].get<std::string>();
-	ctx.calibratedRotation(0) = obj["roll"].get<double>();
-	ctx.calibratedRotation(1) = obj["yaw"].get<double>();
-	ctx.calibratedRotation(2) = obj["pitch"].get<double>();
-	ctx.calibratedTranslation(0) = obj["x"].get<double>();
-	ctx.calibratedTranslation(1) = obj["y"].get<double>();
-	ctx.calibratedTranslation(2) = obj["z"].get<double>();
+	ctx.calibratingTargetTrackingSystem = obj["target_tracking_system"].get<std::string>();
+
+	picojson::object calibrations = obj["calibrated_spaces"].get<picojson::object>();
+	for (const auto& pair : calibrations) {
+		std::string n = pair.first;
+		picojson::object s = pair.second.get<picojson::object>();
+
+		ctx.calibratedRotations[n] = Eigen::Vector3d();
+		ctx.calibratedTranslations[n] = Eigen::Vector3d();
+
+		ctx.calibratedRotations[n](0) = s["roll"].get<double>();
+		ctx.calibratedRotations[n](1) = s["yaw"].get<double>();
+		ctx.calibratedRotations[n](2) = s["pitch"].get<double>();
+		ctx.calibratedTranslations[n](0) = s["x"].get<double>();
+		ctx.calibratedTranslations[n](1) = s["y"].get<double>();
+		ctx.calibratedTranslations[n](2) = s["z"].get<double>();
+
+		if (s["scale"].is<double>())
+			ctx.calibratedScales[n] = s["scale"].get<double>();
+		else
+			ctx.calibratedScales[n] = 1.0;
+
+		if (ctx.calibratedScales[n] <= 0.001) {
+			ctx.calibratedScales[n] = 1.0;
+		}
+	}
 	LoadStandby(ctx.referenceStandby, obj["reference_device"]);
 	LoadStandby(ctx.targetStandby, obj["target_device"]);
 	if (obj["autostart_continuous_calibration"].evaluate_as_boolean()) {
 		ctx.state = CalibrationState::ContinuousStandby;
 	}
 	ctx.quashTargetInContinuous = obj["quash_target_in_continuous"].evaluate_as_boolean();
-
-	if (obj["scale"].is<double>())
-		ctx.calibratedScale = obj["scale"].get<double>();
-	else
-		ctx.calibratedScale = 1.0;
 
 	if (obj["calibration_speed"].is<double>())
 		ctx.calibrationSpeed = (CalibrationContext::Speed)(int) obj["calibration_speed"].get<double>();
@@ -156,28 +170,28 @@ static void ParseProfile(CalibrationContext &ctx, std::istream &stream)
 	}
 	if (obj["relative_transform"].is<picojson::object>()) {
 		auto relTransform = obj["relative_transform"].get<picojson::object>();
-		Eigen::Vector3d refToTragetRoation;
+		Eigen::Vector3d refToTargetRotation;
 		Eigen::Vector3d refToTargetTranslation;
 
-		refToTragetRoation(0) = relTransform["roll"].get<double>();
-		refToTragetRoation(1) = relTransform["yaw"].get<double>();
-		refToTragetRoation(2) = relTransform["pitch"].get<double>();
+		refToTargetRotation(0) = relTransform["roll"].get<double>();
+		refToTargetRotation(1) = relTransform["yaw"].get<double>();
+		refToTargetRotation(2) = relTransform["pitch"].get<double>();
 		refToTargetTranslation(0) = relTransform["x"].get<double>();
 		refToTargetTranslation(1) = relTransform["y"].get<double>();
 		refToTargetTranslation(2) = relTransform["z"].get<double>();
 
         Eigen::Matrix3d rotationMatrix;
         rotationMatrix =
-            Eigen::AngleAxisd(refToTragetRoation[0], Eigen::Vector3d::UnitX()) *
-            Eigen::AngleAxisd(refToTragetRoation[1], Eigen::Vector3d::UnitY()) *
-            Eigen::AngleAxisd(refToTragetRoation[2], Eigen::Vector3d::UnitZ());
+            Eigen::AngleAxisd(refToTargetRotation[0], Eigen::Vector3d::UnitX()) *
+            Eigen::AngleAxisd(refToTargetRotation[1], Eigen::Vector3d::UnitY()) *
+            Eigen::AngleAxisd(refToTargetRotation[2], Eigen::Vector3d::UnitZ());
 
 		ctx.refToTargetPose = Eigen::AffineCompact3d::Identity();
         ctx.refToTargetPose.linear() = rotationMatrix;
         ctx.refToTargetPose.translation() = refToTargetTranslation;
 	}
 
-	ctx.validProfile = true;
+	ctx.validProfile = ctx.TrackingSystemHasCalibration(ctx.calibratingTargetTrackingSystem);
 }
 
 
@@ -201,14 +215,24 @@ static void WriteProfile(CalibrationContext &ctx, std::ostream &out)
 	profile["alignment_params"].set<picojson::object>(SaveAlignmentParams(ctx));
 	
 	profile["reference_tracking_system"].set<std::string>(ctx.referenceTrackingSystem);
-	profile["target_tracking_system"].set<std::string>(ctx.targetTrackingSystem);
-	profile["roll"].set<double>(ctx.calibratedRotation(0));
-	profile["yaw"].set<double>(ctx.calibratedRotation(1));
-	profile["pitch"].set<double>(ctx.calibratedRotation(2));
-	profile["x"].set<double>(ctx.calibratedTranslation(0));
-	profile["y"].set<double>(ctx.calibratedTranslation(1));
-	profile["z"].set<double>(ctx.calibratedTranslation(2));
-	profile["scale"].set<double>(ctx.calibratedScale);
+	profile["target_tracking_system"].set<std::string>(ctx.calibratingTargetTrackingSystem);
+	
+	picojson::object calibrations;
+	for (const auto& pair : ctx.calibratedRotations) {
+		picojson::object s;
+		std::string n = pair.first;
+
+		s["roll"].set<double>(ctx.calibratedRotations[n](0));
+		s["yaw"].set<double>(ctx.calibratedRotations[n](1));
+		s["pitch"].set<double>(ctx.calibratedRotations[n](2));
+		s["x"].set<double>(ctx.calibratedTranslations[n](0));
+		s["y"].set<double>(ctx.calibratedTranslations[n](1));
+		s["z"].set<double>(ctx.calibratedTranslations[n](2));
+		s["scale"].set<double>(ctx.calibratedScales[n]);
+
+		calibrations[n].set<picojson::object>(s);
+	}
+	profile["calibrated_spaces"].set<picojson::object>(calibrations);
 	WriteStandby(ctx.referenceStandby, profile["reference_device"]);
 	WriteStandby(ctx.targetStandby, profile["target_device"]);
 	bool isInContinuousCalibrationMode = ctx.state == CalibrationState::Continuous || ctx.state == CalibrationState::ContinuousStandby;

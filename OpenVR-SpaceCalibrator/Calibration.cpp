@@ -164,7 +164,7 @@ namespace {
 		target.poseIsValid = false;
 
 		reference = ctx.devicePoses[ctx.referenceID];
-		target = ctx.devicePoses[ctx.targetID];
+		target = ctx.devicePoses[ctx.calibratingTargetID];
 
 		bool ok = true;
 		if (!reference.poseIsValid)
@@ -199,11 +199,11 @@ namespace {
 			CalCtx.referenceID = state.FindDevice(CalCtx.referenceStandby.trackingSystem, CalCtx.referenceStandby.model, CalCtx.referenceStandby.serial);
 		}
 
-		if (CalCtx.targetID < 0) {
-			CalCtx.targetID = state.FindDevice(CalCtx.targetStandby.trackingSystem, CalCtx.targetStandby.model, CalCtx.targetStandby.serial);
+		if (CalCtx.calibratingTargetID < 0) {
+			CalCtx.calibratingTargetID = state.FindDevice(CalCtx.targetStandby.trackingSystem, CalCtx.targetStandby.model, CalCtx.targetStandby.serial);
 		}
 
-		return CalCtx.referenceID >= 0 && CalCtx.targetID >= 0;
+		return CalCtx.referenceID >= 0 && CalCtx.calibratingTargetID >= 0;
 	}
 }
 
@@ -233,7 +233,7 @@ void ScanAndApplyProfile(CalibrationContext &ctx)
 	std::unique_ptr<char[]> buffer_array(new char
 [vr::k_unMaxPropertyStringSize]);
 	char* buffer = buffer_array.get();
-	ctx.enabled = ctx.validProfile;
+	ctx.enabled = true;
 
 	protocol::Request setParamsReq(protocol::RequestSetAlignmentSpeedParams);
 	setParamsReq.setAlignmentSpeedParams = ctx.alignmentSpeedParams;
@@ -286,8 +286,13 @@ void ScanAndApplyProfile(CalibrationContext &ctx)
 			continue;
 		}
 
-		if (trackingSystem != ctx.targetTrackingSystem)
+		if (trackingSystem == ctx.referenceTrackingSystem)
 		{
+			ResetAndDisableOffsets(id);
+			continue;
+		}
+
+		if (!ctx.TrackingSystemHasCalibration(trackingSystem)) {
 			ResetAndDisableOffsets(id);
 			continue;
 		}
@@ -296,12 +301,12 @@ void ScanAndApplyProfile(CalibrationContext &ctx)
 		req.setDeviceTransform = {
 			id,
 			true,
-			VRTranslationVec(ctx.calibratedTranslation),
-			VRRotationQuat(ctx.calibratedRotation),
-			ctx.calibratedScale
+			VRTranslationVec(ctx.calibratedTranslations[trackingSystem]),
+			VRRotationQuat(ctx.calibratedRotations[trackingSystem]),
+			ctx.calibratedScales[trackingSystem]
 		};
 		req.setDeviceTransform.lerp = CalCtx.state == CalibrationState::Continuous;
-		req.setDeviceTransform.quash = CalCtx.state == CalibrationState::Continuous && id == CalCtx.targetID && CalCtx.quashTargetInContinuous;
+		req.setDeviceTransform.quash = CalCtx.state == CalibrationState::Continuous && id == CalCtx.calibratingTargetID && CalCtx.quashTargetInContinuous;
 
 		Driver.SendBlocking(req);
 	}
@@ -325,6 +330,7 @@ void StartCalibration()
 	CalCtx.state = CalibrationState::Begin;
 	CalCtx.wantedUpdateInterval = 0.0;
 	CalCtx.messages.clear();
+	CalCtx.ResetCalibrationForSystem(CalCtx.referenceTrackingSystem);
 	calibration.Clear();
 	Metrics::WriteLogAnnotation("StartCalibration");
 }
@@ -409,7 +415,7 @@ void CalibrationTick(double time)
 		CalCtx.Log("Missing reference device\n");
 		ok = false;
 	}
-	if (ctx.targetID == -1 || ctx.targetID >= vr::k_unMaxTrackedDeviceCount)
+	if (ctx.calibratingTargetID == -1 || ctx.calibratingTargetID >= vr::k_unMaxTrackedDeviceCount)
 	{
 		CalCtx.Log("Missing target device\n");
 		ok = false;
@@ -421,12 +427,12 @@ void CalibrationTick(double time)
 		char referenceSerial[256], targetSerial[256];
 		referenceSerial[0] = targetSerial[0] = 0;
 		vr::VRSystem()->GetStringTrackedDeviceProperty(ctx.referenceID, vr::Prop_SerialNumber_String, referenceSerial, 256);
-		vr::VRSystem()->GetStringTrackedDeviceProperty(ctx.targetID, vr::Prop_SerialNumber_String, targetSerial, 256);
+		vr::VRSystem()->GetStringTrackedDeviceProperty(ctx.calibratingTargetID, vr::Prop_SerialNumber_String, targetSerial, 256);
 
 		char buf[256];
 		snprintf(buf, sizeof buf, "Reference device ID: %d, serial: %s\n", ctx.referenceID, referenceSerial);
 		CalCtx.Log(buf);
-		snprintf(buf, sizeof buf, "Target device ID: %d, serial %s\n", ctx.targetID, targetSerial);
+		snprintf(buf, sizeof buf, "Target device ID: %d, serial %s\n", ctx.calibratingTargetID, targetSerial);
 		CalCtx.Log(buf);
 
 		ScanAndApplyProfile(ctx);
@@ -488,12 +494,13 @@ void CalibrationTick(double time)
 		}
 
 		if (calibration.isValid()) {
-			ctx.calibratedRotation = calibration.EulerRotation();
-			ctx.calibratedTranslation = calibration.Transformation().translation() * 100.0; // convert to cm units for profile storage
+			ctx.calibratedRotations[ctx.calibratingTargetTrackingSystem] = calibration.EulerRotation();
+			ctx.calibratedTranslations[ctx.calibratingTargetTrackingSystem] = calibration.Transformation().translation() * 100.0; // convert to cm units for profile storage
+			ctx.calibratedScales[ctx.calibratingTargetTrackingSystem] = calibration.m_estimatedScale;
 			ctx.refToTargetPose = calibration.RelativeTransformation();
 			ctx.relativePosCalibrated = calibration.isRelativeTransformationCalibrated();
 
-			auto vrTrans = VRTranslationVec(ctx.calibratedTranslation);
+			auto vrTrans = VRTranslationVec(ctx.calibratedTranslations[ctx.calibratingTargetTrackingSystem]);
 			auto vrRot = VRRotationQuat(Eigen::Quaterniond(calibration.Transformation().rotation()));
 
 			ctx.validProfile = true;

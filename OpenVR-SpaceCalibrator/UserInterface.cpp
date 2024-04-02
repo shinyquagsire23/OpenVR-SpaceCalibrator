@@ -242,7 +242,7 @@ void CCal_BasicInfo() {
 			CalCtx.targetStandby.model.c_str(),
 			CalCtx.targetStandby.serial.c_str()
 		);
-		if (CalCtx.targetID < 0) {
+		if (CalCtx.calibratingTargetID < 0) {
 			ImGui::TableSetBgColor(ImGuiTableBgTarget_CellBg, 0xFF000080);
 			status = "NOT FOUND";
 		}
@@ -347,7 +347,7 @@ void BuildMenu(bool runningInOverlay)
 			ImGui::SameLine();
 			if (ImGui::Button("Clear Calibration", ImVec2(width * scale, ImGui::GetTextLineHeight() * 2)))
 			{
-				CalCtx.Clear();
+				CalCtx.ResetCalibrationForSystem(CalCtx.calibratingTargetTrackingSystem);
 				SaveProfile(CalCtx);
 			}
 		}
@@ -476,7 +476,7 @@ void BuildSystemSelection(const VRState &state)
 		{
 			currentReferenceSystem = (int) referenceSystems.size();
 		}
-		else if (firstReferenceSystemNotTargetSystem == -1 && str != CalCtx.targetTrackingSystem)
+		else if (firstReferenceSystemNotTargetSystem == -1 && str != CalCtx.calibratingTargetTrackingSystem)
 		{
 			firstReferenceSystemNotTargetSystem = (int) referenceSystems.size();
 		}
@@ -502,11 +502,11 @@ void BuildSystemSelection(const VRState &state)
 	if (currentReferenceSystem != -1 && currentReferenceSystem < (int) referenceSystems.size())
 	{
 		CalCtx.referenceTrackingSystem = std::string(referenceSystems[currentReferenceSystem]);
-		if (CalCtx.referenceTrackingSystem == CalCtx.targetTrackingSystem)
-			CalCtx.targetTrackingSystem = "";
+		if (CalCtx.referenceTrackingSystem == CalCtx.calibratingTargetTrackingSystem)
+			CalCtx.calibratingTargetTrackingSystem = "";
 	}
 
-	if (CalCtx.targetTrackingSystem == "") {
+	if (CalCtx.calibratingTargetTrackingSystem == "") {
 		if (CalCtx.state == CalibrationState::ContinuousStandby) {
 			auto iter = std::find(state.trackingSystems.begin(), state.trackingSystems.end(), CalCtx.targetStandby.trackingSystem);
 			if (iter != state.trackingSystems.end()) {
@@ -523,7 +523,7 @@ void BuildSystemSelection(const VRState &state)
 	{
 		if (str != CalCtx.referenceTrackingSystem)
 		{
-			if (str != "" && str == CalCtx.targetTrackingSystem)
+			if (str != "" && str == CalCtx.calibratingTargetTrackingSystem)
 				currentTargetSystem = (int) targetSystems.size();
 			targetSystems.push_back(str.c_str());
 		}
@@ -534,7 +534,8 @@ void BuildSystemSelection(const VRState &state)
 
 	if (currentTargetSystem != -1 && currentTargetSystem < targetSystems.size())
 	{
-		CalCtx.targetTrackingSystem = std::string(targetSystems[currentTargetSystem]);
+		CalCtx.calibratingTargetTrackingSystem = std::string(targetSystems[currentTargetSystem]);
+		CalCtx.validProfile = CalCtx.TrackingSystemHasCalibration(CalCtx.calibratingTargetTrackingSystem);
 	}
 
 	ImGui::PopItemWidth();
@@ -685,14 +686,14 @@ void BuildDeviceSelections(const VRState &state)
 	ImGui::SameLine();
 
 	ImGui::BeginChild("right device pane", paneSize, true);
-	BuildDeviceSelection(state, CalCtx.targetID, CalCtx.targetTrackingSystem, CalCtx.targetStandby);
+	BuildDeviceSelection(state, CalCtx.calibratingTargetID, CalCtx.calibratingTargetTrackingSystem, CalCtx.targetStandby);
 	ImGui::EndChild();
 
 	if (ImGui::Button("Identify selected devices (blinks LED or vibrates)", ImVec2(ImGui::GetWindowContentRegionWidth(), ImGui::GetTextLineHeightWithSpacing() + 4.0f)))
 	{
 		for (unsigned i = 0; i < 100; ++i)
 		{
-			vr::VRSystem()->TriggerHapticPulse(CalCtx.targetID, 0, 2000);
+			vr::VRSystem()->TriggerHapticPulse(CalCtx.calibratingTargetID, 0, 2000);
 			vr::VRSystem()->TriggerHapticPulse(CalCtx.referenceID, 0, 2000);
 			std::this_thread::sleep_for(std::chrono::milliseconds(5));
 		}
@@ -711,9 +712,9 @@ VRState LoadVRState() {
 			trackingSystems.push_back(CalCtx.referenceTrackingSystem);
 		}
 
-		existing = std::find(trackingSystems.begin(), trackingSystems.end(), CalCtx.targetTrackingSystem);
+		existing = std::find(trackingSystems.begin(), trackingSystems.end(), CalCtx.calibratingTargetTrackingSystem);
 		if (existing == trackingSystems.end()) {
-			trackingSystems.push_back(CalCtx.targetTrackingSystem);
+			trackingSystems.push_back(CalCtx.calibratingTargetTrackingSystem);
 		}
 	}
 
@@ -733,11 +734,11 @@ void BuildProfileEditor()
 	TextWithWidth("RollLabel", "Roll", width);
 
 	ImGui::PushItemWidth(widthF);
-	ImGui::InputDouble("##Yaw", &CalCtx.calibratedRotation(1), 0.1, 1.0, "%.8f");
+	ImGui::InputDouble("##Yaw", &CalCtx.calibratedRotations[CalCtx.calibratingTargetTrackingSystem](1), 0.1, 1.0, "%.8f");
 	ImGui::SameLine();
-	ImGui::InputDouble("##Pitch", &CalCtx.calibratedRotation(2), 0.1, 1.0, "%.8f");
+	ImGui::InputDouble("##Pitch", &CalCtx.calibratedRotations[CalCtx.calibratingTargetTrackingSystem](2), 0.1, 1.0, "%.8f");
 	ImGui::SameLine();
-	ImGui::InputDouble("##Roll", &CalCtx.calibratedRotation(0), 0.1, 1.0, "%.8f");
+	ImGui::InputDouble("##Roll", &CalCtx.calibratedRotations[CalCtx.calibratingTargetTrackingSystem](0), 0.1, 1.0, "%.8f");
 
 	TextWithWidth("XLabel", "X", width);
 	ImGui::SameLine();
@@ -745,15 +746,15 @@ void BuildProfileEditor()
 	ImGui::SameLine();
 	TextWithWidth("ZLabel", "Z", width);
 
-	ImGui::InputDouble("##X", &CalCtx.calibratedTranslation(0), 1.0, 10.0, "%.8f");
+	ImGui::InputDouble("##X", &CalCtx.calibratedTranslations[CalCtx.calibratingTargetTrackingSystem](0), 1.0, 10.0, "%.8f");
 	ImGui::SameLine();
-	ImGui::InputDouble("##Y", &CalCtx.calibratedTranslation(1), 1.0, 10.0, "%.8f");
+	ImGui::InputDouble("##Y", &CalCtx.calibratedTranslations[CalCtx.calibratingTargetTrackingSystem](1), 1.0, 10.0, "%.8f");
 	ImGui::SameLine();
-	ImGui::InputDouble("##Z", &CalCtx.calibratedTranslation(2), 1.0, 10.0, "%.8f");
+	ImGui::InputDouble("##Z", &CalCtx.calibratedTranslations[CalCtx.calibratingTargetTrackingSystem](2), 1.0, 10.0, "%.8f");
 
 	TextWithWidth("ScaleLabel", "Scale", width);
 
-	ImGui::InputDouble("##Scale", &CalCtx.calibratedScale, 0.0001, 0.01, "%.8f");
+	ImGui::InputDouble("##Scale", &CalCtx.calibratedScales[CalCtx.calibratingTargetTrackingSystem], 0.0001, 0.01, "%.8f");
 	ImGui::PopItemWidth();
 }
 
